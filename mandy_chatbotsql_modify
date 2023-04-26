@@ -1,0 +1,1572 @@
+INSERT OVERWRITE  dwd_cs_inhouse_sop_agent_performance_bi  PARTITION (grass_date = '${end_date}') 
+ select  *
+from    (
+    select  t1.grass_region
+            ,t1.grass_date as cdate
+            ,t1.agent_email
+            ,t1.metrics_type
+            ,t1.fenzi
+            ,t1.fenmu
+            ,t2.sop_usage_fenzi
+            ,t2.sop_usage_fenmu
+            ,case   when t3.agent_email is not null then 'whitelist'
+                    else 'non-whitelist'
+             end is_whitelist_agent
+            ,t5.agent_type
+            ,t6.role_name_type role_name
+            ,t6.agent_level
+            ,'Chat' channel
+            ,'Total' is_full_use 
+    from    (
+        select  grass_region
+                ,grass_date
+                ,agent_email
+                ,metrics_type
+                ,fenzi
+                ,fenmu
+        from    (
+            -- qa_case_cnt :CAES粒度，只要有出线过这个渠道就包含在内）
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'qa_case_cnt' metrics_type
+                    ,count(distinct t1.case_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+        --    union all 
+        --    -- productivity score
+        --    select  grass_region
+        --            ,grass_date
+        --            ,agent_email
+        --            ,'Productivity_score' as metrics_type
+        --            ,sum(channel_score_1h) as fenzi
+        --            ,count(1) as fenmu
+        --    from    regops_cs.dwd_agent_reg_bucketization_shopee_productivity_wi_live
+        --    where   grass_date >= date('2022-11-01')
+        --      and   channel_type = 1
+        --    group by 1, 2, 3
+            union all 
+            -- productivity
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'Productivity' as metrics_type
+                    ,count(distinct chat_session_id) as fenzi
+                    ,null fenmu
+            from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+            where   grass_date >= date('2022-11-01')
+              and   session_source = 101
+              and   session_status = 5
+              and   outgoing_msg_cnt > 0
+              and   queue_id <> 0
+            group by 1, 2, 3
+            union all 
+            -- efficiency: Chat Duration
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'Chat_Duration' as metrics_type
+                    ,sum(t1.handling_dur_secs/60) as fenzi
+                    ,count(distinct t1.chat_session_id) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+            ) t1
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t2
+            on      t1.grass_region = t2.region_id
+              and   t1.level3_case_category_id = t2.reason_code_l3_id
+              and   date(t1.grass_date) = date(t2.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: AFCR
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'AFCR' as metrics_type
+                    ,count(distinct case when t1.is_afcr = 1 then t1.case_id end) as fenzi
+                    ,count(distinct t1.case_id) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_afcr_hic_wi_v2_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    (
+                    select  *
+                            ,ROW_NUMBER() OVER(PARTITION BY grass_region, case_id ORDER BY grass_date desc) rk
+                    from    chatbot_data.inhouse_mart__dim_case__reg_s1
+                    where   grass_date >= date('2022-11-01')
+                      and   case_origin_channel_id = 1
+                      and   level3_case_category_id > 0
+                ) t
+                where   rk = 1
+                group by 1
+            ) t2	-- 只取case首次出线是email 渠道的case 
+            on t1.case_id=t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --quality: QA Score
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'QA_score' as metrics_type
+                    ,sum(score) as fenzi
+                    ,count(1) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+    union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1 
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --  # of BEC: Chat CSAT
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'bad_CSAT' as metrics_type
+                    ,count(distinct session_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id = 3
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+        ) t
+    ) t1
+    left outer join (	-- sop used rate
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email_operate as agent_email
+                ,count(distinct case  when manually_used_logs > 0  and is_l1_cover_sop = 1  then sop_instance_id end) as sop_usage_fenzi
+                ,count(distinct case when is_l1_cover_sop = 1 then sop_instance_id end) as sop_usage_fenmu
+        from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+        where   grass_date >= date('2022-11-01')
+          and   cdate >= date('2022-11-01')
+          and   channel_type = 1
+        group by 1, 2, 3
+    ) t2
+    on      t1.grass_region = t2.grass_region
+      and   t1.grass_date = t2.grass_date
+      and   t1.agent_email = t2.agent_email
+    left outer join (
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_whitelist_agent_bi_df
+        where   grass_date >= date('2022-11-01')
+    ) t3
+    on      t1.grass_region = t3.grass_region
+      and   t1.grass_date = t3.grass_date
+      and   t1.agent_email = t3.agent_email
+    left outer join (
+        --agent_id维表
+        select  grass_region
+                ,agent_email
+                ,max(agent_company) as agent_company
+                ,max(agent_type_name) as agent_type
+        from    chatbot_data.inhouse_mart__dim_agent__reg_s1
+        where   grass_date >= date_add(date('${end_date}'), -1)
+          and   agent_id is not null
+          and   saas_id = 392348641336307168
+        group by 1, 2
+    ) t5
+    on      upper(t1.grass_region) = upper(t5.grass_region)
+      and   t1.agent_email = t5.agent_email
+    left outer join (
+        select  *
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_agent_bi_df
+        where   grass_date = date('${end_date}')
+    ) t6
+    on      upper(t1.grass_region) = upper(t6.grass_region)
+      and   t1.agent_email = t6.agent_email
+      
+    union all 
+    select  t1.grass_region
+            ,t1.grass_date as cdate
+            ,t1.agent_email
+            ,t1.metrics_type
+            ,t1.fenzi
+            ,t1.fenmu
+            ,t2.sop_usage_fenzi
+            ,t2.sop_usage_fenmu
+            ,case   when t3.agent_email is not null then 'whitelist'
+                    else 'non-whitelist'
+             end is_whitelist_agent
+            ,t5.agent_type
+            ,t6.role_name_type role_name
+            ,t6.agent_level
+            ,'Email' channel
+            ,'Total' is_full_use 
+    from    (
+        select  grass_region
+                ,grass_date
+                ,agent_email
+                ,metrics_type
+                ,fenzi
+                ,fenmu
+        from    (
+            -- qa_case_cnt :CAES粒度，只要有出线过这个渠道就包含在内）
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'qa_case_cnt' metrics_type
+                    ,count(distinct t1.case_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            group by 1, 2, 3
+            union all 	-- 只看该渠道上的得分
+            -- productivity score
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'Productivity_score' as metrics_type
+                    ,sum(channel_score_1h) as fenzi
+                    ,count(1) as fenmu
+            from    regops_cs.dwd_agent_reg_bucketization_shopee_productivity_wi_live
+            where   grass_date >= date('2022-11-01')
+              and   channel_type = 3
+            group by 1, 2, 3
+            union all 
+            -- productivity 只统计该渠道上的得分；
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'Productivity' as metrics_type
+                    ,count(distinct email_id) as fenzi
+                    ,null fenmu
+            from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+            where   grass_date >= date('2022-11-01')
+              and   (
+                            email_type = 'OUTBOUND'
+                        or  (
+                                    email_type = 'SYSTEM_SEND'
+                                and email_subject like '%Request Updated-Case%'
+                            )
+                    )
+            group by 1, 2, 3
+            union all 
+            -- quality: AFCR 只取首次出线是eamil的case，去看每个agent一次性解决掉的比例；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'AFCR' as metrics_type
+                    ,count(distinct case when t1.is_afcr = 1 then t1.case_id end) as fenzi
+                    ,count(distinct t1.case_id) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_afcr_hic_wi_v2_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    (
+                    select  *
+                            ,ROW_NUMBER() OVER(PARTITION BY grass_region, case_id ORDER BY grass_date desc) rk
+                    from    chatbot_data.inhouse_mart__dim_case__reg_s1
+                    where   grass_date >= date('2022-11-01')
+                      and   case_origin_channel_id = 3
+                      and   level3_case_category_id > 0
+                ) t
+                where   rk = 1
+                group by 1
+            ) t2	-- 只取case首次出线是email 渠道的case 
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --quality: QA Score：只要有该渠道的出线都会包含；
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'QA_score' as metrics_type
+                    ,sum(score) as fenzi
+                    ,count(1) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            group by 1, 2, 3
+            union all 
+            -- quality: email CSAT : Email的case其实是case的csat，只要有过该渠道的出线都被包含；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: email CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_Case' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+union all 
+            -- quality: email CSAT : Email的case其实是case的csat，只要有过该渠道的出线都被包含；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: email CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --  # of BEC: Chat CSAT: case 有过该渠道的出线，且sop covered
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'bad_CSAT' as metrics_type
+                    ,count(distinct session_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   csat_level_id = 3
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+        ) t
+    ) t1
+    left outer join (	-- sop used rate
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email_operate as agent_email
+                ,count(distinct case  when manually_used_logs > 0  and is_l1_cover_sop = 1  then sop_instance_id end) as sop_usage_fenzi
+                ,count(distinct case when is_l1_cover_sop = 1 then sop_instance_id end) as sop_usage_fenmu
+        from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+        where   grass_date = date('${end_date}')
+          and   cdate >= date('2022-11-01')
+          and   channel_type = 3
+        group by 1, 2, 3
+    ) t2
+    on      t1.grass_region = t2.grass_region
+      and   t1.grass_date = t2.grass_date
+      and   t1.agent_email = t2.agent_email
+    left outer join (
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_whitelist_agent_bi_df
+        where   grass_date >= date('2022-11-01')
+    ) t3
+    on      t1.grass_region = t3.grass_region
+      and   t1.grass_date = t3.grass_date
+      and   t1.agent_email = t3.agent_email
+    left outer join (
+        --agent_id维表
+        select  grass_region
+                ,agent_email
+                ,max(agent_company) as agent_company
+                ,max(agent_type_name) as agent_type
+        from    chatbot_data.inhouse_mart__dim_agent__reg_s1
+        where   grass_date >= date_add(date('${end_date}'), -1)
+          and   agent_id is not null
+          and   saas_id = 392348641336307168
+        group by 1, 2
+    ) t5
+    on      upper(t1.grass_region) = upper(t5.grass_region)
+      and   t1.agent_email = t5.agent_email
+    left outer join (
+        select  *
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_agent_bi_df
+        where   grass_date = date('${end_date}')
+    ) t6
+    on      upper(t1.grass_region) = upper(t6.grass_region)
+      and   t1.agent_email = t6.agent_email
+
+union all 
+
+
+    select  t1.grass_region
+            ,t1.grass_date as cdate
+            ,t1.agent_email
+            ,t1.metrics_type
+            ,t1.fenzi
+            ,t1.fenmu
+            ,t2.sop_usage_fenzi
+            ,t2.sop_usage_fenmu
+            ,case   when t3.agent_email is not null then 'whitelist'
+                    else 'non-whitelist'
+             end is_whitelist_agent
+            ,t5.agent_type
+            ,t6.role_name_type role_name
+            ,t6.agent_level
+            ,'Chat' channel
+            ,'Full Used' is_full_use 
+    from    (
+        select  grass_region
+                ,grass_date
+                ,agent_email
+                ,metrics_type
+                ,fenzi
+                ,fenmu
+        from    (
+            -- qa_case_cnt :CAES粒度，只要有出线过这个渠道就包含在内）
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'qa_case_cnt' metrics_type
+                    ,count(distinct t1.case_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3 
+            union all 
+            -- efficiency: Chat Duration
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'Chat_Duration' as metrics_type
+                    ,sum(t1.handling_dur_secs/60) as fenzi
+                    ,count(distinct t1.chat_session_id) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+            ) t1
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t2
+            on      t1.grass_region = t2.region_id
+              and   t1.level3_case_category_id = t2.reason_code_l3_id
+              and   date(t1.grass_date) = date(t2.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: AFCR
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'AFCR' as metrics_type
+                    ,count(distinct case when t1.is_afcr = 1 then t1.case_id end) as fenzi
+                    ,count(distinct t1.case_id) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_afcr_hic_wi_v2_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    (
+                    select  *
+                            ,ROW_NUMBER() OVER(PARTITION BY grass_region, case_id ORDER BY grass_date desc) rk
+                    from    chatbot_data.inhouse_mart__dim_case__reg_s1
+                    where   grass_date >= date('2022-11-01')
+                      and   case_origin_channel_id = 1
+                      and   level3_case_category_id > 0
+                ) t
+                where   rk = 1
+                group by 1
+            ) t2	-- 只取case首次出线是email 渠道的case 
+            on t1.case_id=t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --quality: QA Score
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'QA_score' as metrics_type
+                    ,sum(score) as fenzi
+                    ,count(1) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_qa_wi_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   session_source = 101
+                  and   session_status = 5
+                  and   outgoing_msg_cnt > 0
+                  and   queue_id <> 0
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: Chat CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case_reason1' as metrics_type
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id >= 1
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --  # of BEC: Chat CSAT
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'bad_CSAT' as metrics_type
+                    ,count(distinct session_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   channel_type_id = 1
+                  and   csat_level_id = 3
+            ) t1
+            join    (
+                select  chat_session_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_chatsessionid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.session_id = t2.chat_session_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+        ) t
+    ) t1
+    left outer join (	-- sop used rate
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email_operate as agent_email
+                ,count(distinct case  when manually_used_logs > 0  and is_l1_cover_sop = 1  then sop_instance_id end) as sop_usage_fenzi
+                ,count(distinct case when is_l1_cover_sop = 1 then sop_instance_id end) as sop_usage_fenmu
+        from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+        where   grass_date >= date('2022-11-01')
+          and   cdate >= date('2022-11-01')
+          and   channel_type = 1
+        group by 1, 2, 3
+    ) t2
+    on      t1.grass_region = t2.grass_region
+      and   t1.grass_date = t2.grass_date
+      and   t1.agent_email = t2.agent_email
+    left outer join (
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_whitelist_agent_bi_df
+        where   grass_date >= date('2022-11-01')
+    ) t3
+    on      t1.grass_region = t3.grass_region
+      and   t1.grass_date = t3.grass_date
+      and   t1.agent_email = t3.agent_email
+    left outer join (
+        --agent_id维表
+        select  grass_region
+                ,agent_email
+                ,max(agent_company) as agent_company
+                ,max(agent_type_name) as agent_type
+        from    chatbot_data.inhouse_mart__dim_agent__reg_s1
+        where   grass_date >= date_add(date('${end_date}'), -1)
+          and   agent_id is not null
+          and   saas_id = 392348641336307168
+        group by 1, 2
+    ) t5
+    on      upper(t1.grass_region) = upper(t5.grass_region)
+      and   t1.agent_email = t5.agent_email
+    left outer join (
+        select  *
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_agent_bi_df
+        where   grass_date = date('${end_date}')
+    ) t6
+    on      upper(t1.grass_region) = upper(t6.grass_region)
+      and   t1.agent_email = t6.agent_email
+      
+    union all 
+    select  t1.grass_region
+            ,t1.grass_date as cdate
+            ,t1.agent_email
+            ,t1.metrics_type
+            ,t1.fenzi
+            ,t1.fenmu
+            ,t2.sop_usage_fenzi
+            ,t2.sop_usage_fenmu
+            ,case   when t3.agent_email is not null then 'whitelist'
+                    else 'non-whitelist'
+             end is_whitelist_agent
+            ,t5.agent_type
+            ,t6.role_name_type role_name
+            ,t6.agent_level
+            ,'Email' channel
+            ,'Full Used' is_full_use 
+    from    (
+        select  grass_region
+                ,grass_date
+                ,agent_email
+                ,metrics_type
+                ,fenzi
+                ,fenmu
+        from    (    
+            -- quality: AFCR 只取首次出线是eamil的case，去看每个agent一次性解决掉的比例；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'AFCR' as metrics_type
+                    ,count(distinct case when t1.is_afcr = 1 then t1.case_id end) as fenzi
+                    ,count(distinct t1.case_id) as fenmu
+            from    (
+                select  *
+                from    regops_cs.dwd_agent_reg_bucketization_shopee_afcr_hic_wi_v2_live
+                where   grass_date >= date('2022-11-01')
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    (
+                    select  *
+                            ,ROW_NUMBER() OVER(PARTITION BY grass_region, case_id ORDER BY grass_date desc) rk
+                    from    chatbot_data.inhouse_mart__dim_case__reg_s1
+                    where   grass_date >= date('2022-11-01')
+                      and   case_origin_channel_id = 3
+                      and   level3_case_category_id > 0
+                ) t
+                where   rk = 1
+                group by 1
+            ) t2	-- 只取case首次出线是email 渠道的case 
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3 
+            union all 
+
+ 
+            -- quality: email CSAT : Email的case其实是case的csat，只要有过该渠道的出线都被包含；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: email CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_Case' as metrics_type
+                    ,count(case when t1.csat_level_id = 1 then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+
+            -- quality: email CSAT : Email的case其实是case的csat，只要有过该渠道的出线都被包含；
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_contact_reason1' as metrics_type 
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            -- quality: email CSAT
+            select  t1.grass_region
+                    ,t1.grass_date
+                    ,t1.agent_email
+                    ,'CSAT_case_reason1' as metrics_type 
+                    ,count(case when t1.csat_level_id = 3 and cast(t1.reason as string)  like '%1%' then t1.session_id end) as fenzi
+                    ,count(case when t1.csat_level_id in (1, 3) then t1.session_id end) as fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  --and   channel_type_id = 3
+                  and   csat_level_id >= 1
+                  and   csat_type_id = 2	--case CSAT 
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+            union all 
+            --  # of BEC: Chat CSAT: case 有过该渠道的出线，且sop covered
+            select  grass_region
+                    ,grass_date
+                    ,agent_email
+                    ,'bad_CSAT' as metrics_type
+                    ,count(distinct session_id) as fenzi
+                    ,null fenmu
+            from    (
+                select  *
+                from    chatbot_data.inhouse_mart__dwd_csatid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   csat_level_id = 3
+            ) t1
+            join    (
+                select  case_id
+                        ,max(level3_case_category_id) l3_reason_code
+                from    chatbot_data.inhouse_mart__dwd_emailid_events_di__reg_s1
+                where   grass_date >= date('2022-11-01')
+                  and   (
+                                email_type = 'OUTBOUND'
+                            or  (
+                                        email_type = 'SYSTEM_SEND'
+                                    and email_subject like '%Request Updated-Case%'
+                                )
+                        )
+                group by 1
+            ) t2
+            on      t1.case_id = t2.case_id
+            join    (
+                select  region_id
+                        ,reason_code_l3_id
+                        ,cdate
+                from   dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+                where   grass_date = date('${end_date}')
+                  and   is_l3_cover_sop = 1
+                  and   is_full_use=1 
+                group by 1, 2, 3
+            ) t3
+            on      t1.grass_region = t3.region_id
+              and   t2.l3_reason_code = t3.reason_code_l3_id
+              and   date(t1.grass_date) = date(t3.cdate)
+            group by 1, 2, 3
+        ) t
+    ) t1
+    left outer join (	-- sop used rate
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email_operate as agent_email
+                ,count(distinct case  when manually_used_logs > 0  and is_l1_cover_sop = 1  then sop_instance_id end) as sop_usage_fenzi
+                ,count(distinct case when is_l1_cover_sop = 1 then sop_instance_id end) as sop_usage_fenmu
+        from    dev_rechatbot_inhouse.dwd_cs_inhouse_sop_instance_id_bi_df
+        where   grass_date = date('${end_date}')
+          and   cdate >= date('2022-11-01')
+          and   channel_type = 3
+        group by 1, 2, 3
+    ) t2
+    on      t1.grass_region = t2.grass_region
+      and   t1.grass_date = t2.grass_date
+      and   t1.agent_email = t2.agent_email
+    left outer join (
+        select  region_id as grass_region
+                ,cdate as grass_date
+                ,agent_email
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_whitelist_agent_bi_df
+        where   grass_date >= date('2022-11-01')
+    ) t3
+    on      t1.grass_region = t3.grass_region
+      and   t1.grass_date = t3.grass_date
+      and   t1.agent_email = t3.agent_email
+    left outer join (
+        --agent_id维表
+        select  grass_region
+                ,agent_email
+                ,max(agent_company) as agent_company
+                ,max(agent_type_name) as agent_type
+        from    chatbot_data.inhouse_mart__dim_agent__reg_s1
+        where   grass_date >= date_add(date('${end_date}'), -1)
+          and   agent_id is not null
+          and   saas_id = 392348641336307168
+        group by 1, 2
+    ) t5
+    on      upper(t1.grass_region) = upper(t5.grass_region)
+      and   t1.agent_email = t5.agent_email
+    left outer join (
+        select  *
+        from    dev_rechatbot_inhouse.dim_cs_inhouse_sop_agent_bi_df
+        where   grass_date = date('${end_date}')
+    ) t6
+    on      upper(t1.grass_region) = upper(t6.grass_region)
+      and   t1.agent_email = t6.agent_email 
+) t
+
